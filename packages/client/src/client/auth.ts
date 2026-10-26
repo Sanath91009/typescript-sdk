@@ -1092,15 +1092,30 @@ export async function auth(provider: OAuthClientProvider, options: AuthOptions):
                 // (RFC 9449 §5) to a DPoP key this process no longer holds — e.g. a non-extractable
                 // key regenerated across a restart. Like invalid_grant, the token set is unusable;
                 // drop it and fall through to a fresh authorization.
+                // That authorization asks again for the scope the dropped grant held, so permissions
+                // granted earlier (e.g. through step-up) survive. Read it first: once the tokens are
+                // gone nothing stored can supply it again, so a refused scope is requested only once.
+                const discarded = await provider.tokens();
                 warnCredentialInvalidation(provider, error, 'tokens');
                 await provider.invalidateCredentials?.('tokens');
-                return await authInternal(provider, options);
+                return await authInternal(provider, options, discarded?.scope);
             }
         }
 
         // Throw otherwise
         throw error;
     }
+}
+
+/**
+ * The values of `scope` the authorization server advertises in `scopes_supported`, or all of them
+ * when it advertises none. A token's `scope` can hold values the server does not accept back in a
+ * request, such as expanded forms of the scope that was requested.
+ */
+function filterToSupportedScopes(scope: string | undefined, metadata: AuthorizationServerMetadata | undefined): string | undefined {
+    const supported = metadata?.scopes_supported;
+    if (!scope || !supported?.length) return scope;
+    return computeScopeUnion(...scope.split(/\s+/).filter(value => supported.includes(value)));
 }
 
 /**
@@ -1148,7 +1163,8 @@ async function authInternal(
         fetchFn,
         skipIssuerMetadataValidation,
         forceReauthorization
-    }: AuthOptions
+    }: AuthOptions,
+    discardedScope?: string
 ): Promise<AuthResult> {
     // SEP-837 / SEP-2207: resolve spec defaults for the DCR body. determineScope()
     // intentionally reads the raw provider.clientMetadata instead.
@@ -1448,13 +1464,19 @@ async function authInternal(
 
     const state = provider.state ? await provider.state() : undefined;
 
-    // Start new authorization flow
+    // Start new authorization flow. After a refused refresh dropped the tokens, also ask for the
+    // scope that grant held (MCP 2026-07-28: re-authorization includes previously granted scopes).
+    // Only when no tokens remain, so a stored grant can never re-supply a scope the server refused,
+    // and only when a scope is requested at all: an omitted `scope` gets the server's default grant,
+    // which an explicit partial request would narrow (RFC 6749 §3.3).
+    const authorizationScope =
+        tokens || !resolvedScope ? resolvedScope : computeScopeUnion(resolvedScope, filterToSupportedScopes(discardedScope, metadata));
     const { authorizationUrl, codeVerifier } = await startAuthorization(authorizationServerUrl, {
         metadata,
         clientInformation,
         state,
         redirectUrl: provider.redirectUrl,
-        scope: resolvedScope,
+        scope: authorizationScope,
         resource
     });
 
