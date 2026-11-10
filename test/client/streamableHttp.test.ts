@@ -509,6 +509,31 @@ describe('StreamableHTTPClientTransport', () => {
         expect(global.fetch).toHaveBeenCalledTimes(2);
     });
 
+    it('should not combine a caller-supplied protocol version header with the negotiated one', async () => {
+        transport = new StreamableHTTPClientTransport(new URL('http://localhost:1234/mcp'), {
+            requestInit: {
+                headers: {
+                    'MCP-Protocol-Version': '2025-03-26'
+                }
+            }
+        });
+        transport.setProtocolVersion('2025-11-25');
+
+        let actualReqInit: RequestInit = {};
+
+        (global.fetch as Mock).mockImplementation(async (_url, reqInit) => {
+            actualReqInit = reqInit;
+            return new Response(null, { status: 202, headers: new Headers() });
+        });
+
+        await transport.send({ jsonrpc: '2.0', method: 'test', params: {} } as JSONRPCMessage);
+
+        // `Headers` compares names case-insensitively, so the transport's negotiated
+        // version replaces the caller's entry instead of being sent alongside it as
+        // `2025-11-25, 2025-03-26`, which the server rejects with a 400.
+        expect((actualReqInit.headers as Headers).get('mcp-protocol-version')).toBe('2025-11-25');
+    });
+
     it('should always send specified custom headers (Headers class)', async () => {
         const requestInit = {
             headers: new Headers({

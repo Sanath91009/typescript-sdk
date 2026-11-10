@@ -6,7 +6,6 @@ import {
     fetchLeavingRedirects,
     fetchWithinOrigin,
     followWithinOrigin,
-    normalizeHeaders,
     unfollowedRedirect
 } from '../shared/transport.js';
 import { isInitializedNotification, isJSONRPCRequest, isJSONRPCResultResponse, JSONRPCMessage, JSONRPCMessageSchema } from '../types.js';
@@ -213,27 +212,26 @@ export class StreamableHTTPClientTransport implements Transport {
     }
 
     private async _commonHeaders(): Promise<Headers> {
-        const headers: HeadersInit & Record<string, string> = {};
+        // Start from the caller's headers and `set()` the transport-managed ones on
+        // top: `Headers.set` compares names case-insensitively, so a caller entry
+        // spelled `MCP-Protocol-Version` is replaced rather than kept alongside the
+        // transport's `mcp-protocol-version` and combined into a two-value header.
+        const headers = new Headers(this._requestInit?.headers || undefined);
         if (this._authProvider) {
             const tokens = await this._authProvider.tokens();
             if (tokens) {
-                headers['Authorization'] = `Bearer ${tokens.access_token}`;
+                headers.set('Authorization', `Bearer ${tokens.access_token}`);
             }
         }
 
         if (this._sessionId) {
-            headers['mcp-session-id'] = this._sessionId;
+            headers.set('mcp-session-id', this._sessionId);
         }
         if (this._protocolVersion) {
-            headers['mcp-protocol-version'] = this._protocolVersion;
+            headers.set('mcp-protocol-version', this._protocolVersion);
         }
 
-        const extraHeaders = normalizeHeaders(this._requestInit?.headers);
-
-        return new Headers({
-            ...headers,
-            ...extraHeaders
-        });
+        return headers;
     }
 
     private async _startOrAuthSse(options: StartSSEOptions): Promise<void> {

@@ -5,7 +5,6 @@ import {
     createFetchWithInit,
     fetchLeavingRedirects,
     fetchWithinOrigin,
-    normalizeHeaders,
     unfollowedRedirect
 } from '../shared/transport.js';
 import { JSONRPCMessage, JSONRPCMessageSchema } from '../types.js';
@@ -145,23 +144,22 @@ export class SSEClientTransport implements Transport {
     }
 
     private async _commonHeaders(): Promise<Headers> {
-        const headers: HeadersInit & Record<string, string> = {};
+        // Start from the caller's headers and `set()` the transport-managed ones on
+        // top: `Headers.set` compares names case-insensitively, so a caller entry
+        // spelled `MCP-Protocol-Version` is replaced rather than kept alongside the
+        // transport's `mcp-protocol-version` and combined into a two-value header.
+        const headers = new Headers(this._requestInit?.headers || undefined);
         if (this._authProvider) {
             const tokens = await this._authProvider.tokens();
             if (tokens) {
-                headers['Authorization'] = `Bearer ${tokens.access_token}`;
+                headers.set('Authorization', `Bearer ${tokens.access_token}`);
             }
         }
         if (this._protocolVersion) {
-            headers['mcp-protocol-version'] = this._protocolVersion;
+            headers.set('mcp-protocol-version', this._protocolVersion);
         }
 
-        const extraHeaders = normalizeHeaders(this._requestInit?.headers);
-
-        return new Headers({
-            ...headers,
-            ...extraHeaders
-        });
+        return headers;
     }
 
     private _startOrAuth(): Promise<void> {
