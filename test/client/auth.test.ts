@@ -15,7 +15,8 @@ import {
     type OAuthClientProvider,
     type OAuthDiscoveryState,
     selectClientAuthMethod,
-    isHttpsUrl
+    isHttpsUrl,
+    IssuerMismatchError
 } from '../../src/client/auth.js';
 import { createPrivateKeyJwtAuth } from '../../src/client/auth-extensions.js';
 import { InvalidClientMetadataError, ServerError } from '../../src/server/auth/errors.js';
@@ -807,6 +808,7 @@ describe('OAuth Authorization', () => {
         };
 
         it('tries URLs in order and returns first successful metadata', async () => {
+            const tenantOidcMetadata = { ...validOpenIdMetadata, issuer: 'https://auth.example.com/tenant1' };
             // First OAuth URL (path before well-known) fails with 404
             mockFetch.mockResolvedValueOnce({
                 ok: false,
@@ -817,12 +819,12 @@ describe('OAuth Authorization', () => {
             mockFetch.mockResolvedValueOnce({
                 ok: true,
                 status: 200,
-                json: async () => validOpenIdMetadata
+                json: async () => tenantOidcMetadata
             });
 
             const metadata = await discoverAuthorizationServerMetadata('https://auth.example.com/tenant1');
 
-            expect(metadata).toEqual(validOpenIdMetadata);
+            expect(metadata).toEqual(tenantOidcMetadata);
 
             // Verify it tried the URLs in the correct order
             const calls = mockFetch.mock.calls;
@@ -843,7 +845,7 @@ describe('OAuth Authorization', () => {
                 json: async () => validOpenIdMetadata
             });
 
-            const metadata = await discoverAuthorizationServerMetadata('https://mcp.example.com');
+            const metadata = await discoverAuthorizationServerMetadata('https://auth.example.com');
 
             expect(metadata).toEqual(validOpenIdMetadata);
         });
@@ -923,6 +925,71 @@ describe('OAuth Authorization', () => {
 
             // Verify that all discovery URLs were attempted
             expect(mockFetch).toHaveBeenCalledTimes(6); // 3 URLs × 2 attempts each (with and without headers)
+        });
+
+        describe('RFC 8414 §3.3 issuer-echo validation', () => {
+            it('rejects metadata whose issuer does not match the discovery input', async () => {
+                mockFetch.mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ ...validOAuthMetadata, issuer: 'https://honest.example.com' })
+                });
+
+                const err = await discoverAuthorizationServerMetadata('https://attacker.example.com').catch(e => e);
+                expect(err).toBeInstanceOf(IssuerMismatchError);
+                expect(err.expected).toBe('https://attacker.example.com');
+                expect(err.received).toBe('https://honest.example.com');
+            });
+
+            it('rejects when metadata issuer matches a different tenant on the same host', async () => {
+                mockFetch.mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ ...validOAuthMetadata, issuer: 'https://auth.example.com/tenant2' })
+                });
+
+                await expect(discoverAuthorizationServerMetadata('https://auth.example.com/tenant1')).rejects.toThrow(IssuerMismatchError);
+            });
+
+            it('accepts when issuer matches the discovery input exactly', async () => {
+                mockFetch.mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => validOAuthMetadata
+                });
+
+                await expect(discoverAuthorizationServerMetadata('https://auth.example.com')).resolves.toEqual(validOAuthMetadata);
+            });
+
+            it('tolerates a trailing slash on the SDK-synthesized discovery input only', async () => {
+                // The legacy-fallback path synthesizes `String(new URL('/', serverUrl))`, which always ends in `/`.
+                mockFetch.mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => validOAuthMetadata // issuer: 'https://auth.example.com'
+                });
+                await expect(discoverAuthorizationServerMetadata('https://auth.example.com/')).resolves.toEqual(validOAuthMetadata);
+
+                // The tolerance is one-directional: a slash on the *received* side is still a mismatch.
+                mockFetch.mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ ...validOAuthMetadata, issuer: 'https://auth.example.com/' })
+                });
+                await expect(discoverAuthorizationServerMetadata('https://auth.example.com')).rejects.toThrow(IssuerMismatchError);
+            });
+
+            it('skipIssuerValidation suppresses the check', async () => {
+                mockFetch.mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ ...validOAuthMetadata, issuer: 'https://honest.example.com' })
+                });
+
+                await expect(
+                    discoverAuthorizationServerMetadata('https://attacker.example.com', { skipIssuerValidation: true })
+                ).resolves.toMatchObject({ issuer: 'https://honest.example.com' });
+            });
         });
     });
 
@@ -2146,7 +2213,7 @@ describe('OAuth Authorization', () => {
                         ok: true,
                         status: 200,
                         json: async () => ({
-                            issuer: 'https://auth.example.com',
+                            issuer: 'https://resource.example.com',
                             authorization_endpoint: 'https://auth.example.com/authorize',
                             token_endpoint: 'https://auth.example.com/token',
                             registration_endpoint: 'https://auth.example.com/register',
@@ -2668,7 +2735,7 @@ describe('OAuth Authorization', () => {
                         ok: true,
                         status: 200,
                         json: async () => ({
-                            issuer: 'https://auth.example.com',
+                            issuer: 'https://api.example.com',
                             authorization_endpoint: 'https://auth.example.com/authorize',
                             token_endpoint: 'https://auth.example.com/token',
                             response_types_supported: ['code'],
@@ -2724,7 +2791,7 @@ describe('OAuth Authorization', () => {
                         ok: true,
                         status: 200,
                         json: async () => ({
-                            issuer: 'https://auth.example.com',
+                            issuer: 'https://api.example.com',
                             authorization_endpoint: 'https://auth.example.com/authorize',
                             token_endpoint: 'https://auth.example.com/token',
                             response_types_supported: ['code'],
@@ -2788,7 +2855,7 @@ describe('OAuth Authorization', () => {
                         ok: true,
                         status: 200,
                         json: async () => ({
-                            issuer: 'https://auth.example.com',
+                            issuer: 'https://api.example.com',
                             authorization_endpoint: 'https://auth.example.com/authorize',
                             token_endpoint: 'https://auth.example.com/token',
                             response_types_supported: ['code'],
@@ -3941,18 +4008,19 @@ describe('OAuth Authorization', () => {
             expect(provider.redirected.at(-1)?.searchParams.get('client_id')).toBe('cid-as-two.example.com');
         });
 
-        it("the binding key is the discovery URL, not the metadata's issuer", async () => {
+        it("metadata claiming another authorization server's issuer is refused", async () => {
+            // RFC 8414 §3.3: a document whose `issuer` names a different authorization server
+            // MUST NOT be used, so the flow stops instead of binding to the discovery URL.
             const srv = createMigratingFetch({ claimedIssuer: { [AS_TWO]: AS_ONE } });
             const provider = createBlobProvider();
             provider.stored.info = { client_id: 'cid', client_secret: 'secret-one', issuer: AS_ONE };
             provider.stored.tokens = { access_token: 'at', token_type: 'Bearer', refresh_token: 'rt-one', issuer: AS_ONE };
             srv.switchTo(AS_TWO);
 
-            const result = await auth(provider, { serverUrl: SERVER_URL, fetchFn: srv.fetchFn });
+            await expect(auth(provider, { serverUrl: SERVER_URL, fetchFn: srv.fetchFn })).rejects.toThrow(IssuerMismatchError);
             expect(srv.tokenCalls).toHaveLength(0);
             expect(sentAnywhere(srv, 'rt-one')).toBe(false);
-            expect(result).toBe('REDIRECT');
-            expect(srv.registerCalls).toEqual([AS_TWO]);
+            expect(srv.registerCalls).toEqual([]);
         });
 
         it('the resource-origin fallback is a distinct binding key', async () => {

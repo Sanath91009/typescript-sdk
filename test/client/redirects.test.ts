@@ -435,12 +435,28 @@ describe('redirects in the HTTP client transports', () => {
             redirectUri: 'http://localhost:3000/callback'
         };
 
+        // Metadata served from the test server has to name that server as its issuer
+        // (RFC 8414 §3.3), so the origin is taken from the request's Host header.
+        const jsonAtHost =
+            (extra: Record<string, unknown> = {}): Handler =>
+            (request, res) => {
+                const origin = `http://${request.headers.host}`;
+                res.writeHead(200, { 'content-type': 'application/json' }).end(
+                    JSON.stringify({
+                        ...metadata,
+                        ...extra,
+                        issuer: origin,
+                        authorization_endpoint: `${origin}/authorize`,
+                        token_endpoint: `${origin}/token`
+                    })
+                );
+            };
+
         it('tries the next authorization server metadata URL when one redirects to another origin', async () => {
             const endpoint = await startServer(
                 routes({
                     'GET /.well-known/oauth-authorization-server': redirectTo(302, new URL('/metadata', other.url).href),
-                    'GET /.well-known/openid-configuration': json({
-                        ...metadata,
+                    'GET /.well-known/openid-configuration': jsonAtHost({
                         jwks_uri: 'https://auth.example.com/jwks',
                         subject_types_supported: ['public'],
                         id_token_signing_alg_values_supported: ['RS256']
@@ -450,7 +466,7 @@ describe('redirects in the HTTP client transports', () => {
 
             const discovered = await discoverAuthorizationServerMetadata(endpoint.url);
 
-            expect(discovered).toMatchObject(metadata);
+            expect(discovered).toMatchObject({ issuer: endpoint.url.origin, token_endpoint: `${endpoint.url.origin}/token` });
             expect(other.requests).toEqual([]);
         });
 
@@ -511,13 +527,13 @@ describe('redirects in the HTTP client transports', () => {
             const endpoint = await startServer(
                 routes({
                     'GET /.well-known/oauth-authorization-server': redirectTo(301, '/metadata'),
-                    'GET /metadata': json(metadata)
+                    'GET /metadata': jsonAtHost()
                 })
             );
 
             const discovered = await discoverAuthorizationServerMetadata(endpoint.url);
 
-            expect(discovered).toMatchObject(metadata);
+            expect(discovered).toMatchObject({ issuer: endpoint.url.origin, token_endpoint: `${endpoint.url.origin}/token` });
         });
     });
 

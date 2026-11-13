@@ -250,6 +250,32 @@ export class UnauthorizedError extends Error {
     }
 }
 
+/**
+ * Thrown by {@linkcode discoverAuthorizationServerMetadata} when the authorization server's
+ * metadata names an `issuer` other than the one discovery was performed for.
+ *
+ * RFC 8414 §3.3 (and OpenID Connect Discovery 1.0 §4.3) require the `issuer` in the document to be
+ * identical to the issuer identifier used to construct the well-known URL; metadata that fails that
+ * check MUST NOT be used.
+ */
+export class IssuerMismatchError extends Error {
+    /** The issuer identifier the metadata was expected to name. */
+    readonly expected: string;
+
+    /** The `issuer` value the document actually advertised. */
+    readonly received: string;
+
+    constructor(expected: string, received: string) {
+        // JSON-encode the embedded values so a control character in a received issuer cannot forge log lines.
+        super(
+            `Issuer mismatch in authorization server metadata (RFC 8414 §3.3): expected ${JSON.stringify(expected)}, received ${JSON.stringify(received)}`
+        );
+        this.name = 'IssuerMismatchError';
+        this.expected = expected;
+        this.received = received;
+    }
+}
+
 type ClientAuthMethod = 'client_secret_basic' | 'client_secret_post' | 'none';
 
 function isClientAuthMethod(method: string): method is ClientAuthMethod {
@@ -558,8 +584,9 @@ async function authInternal(
 
     // Binding key for stored credentials: the authorization server URL that discovery used
     // (advertised by the resource server, restored from discoveryState(), or the legacy
-    // resource-origin fallback). `metadata.issuer` is deliberately not used: this version does
-    // not check that the metadata document echoes the URL it was fetched from.
+    // resource-origin fallback). Discovery now rejects metadata whose `issuer` does not echo that
+    // URL (RFC 8414 §3.3), so the two name the same authorization server; the requested URL stays
+    // the key because stored credentials must be matchable before any metadata is fetched.
     const issuer = String(authorizationServerUrl);
 
     // Send the metadata's resource indicator verbatim: `selectResourceURL` returns a parsed
@@ -1077,16 +1104,21 @@ export function buildDiscoveryUrls(authorizationServerUrl: string | URL): { url:
  * @param options - Configuration options
  * @param options.fetchFn - Optional fetch function for making HTTP requests, defaults to global fetch
  * @param options.protocolVersion - MCP protocol version to use, defaults to LATEST_PROTOCOL_VERSION
+ * @param options.skipIssuerValidation - Skip the RFC 8414 §3.3 `issuer` echo check. **Security-weakening.**
+ *                                       Intended only for known-misconfigured authorization servers.
  * @returns Promise resolving to authorization server metadata, or undefined if discovery fails
+ * @throws {IssuerMismatchError} when the metadata's `issuer` does not match `authorizationServerUrl`
  */
 export async function discoverAuthorizationServerMetadata(
     authorizationServerUrl: string | URL,
     {
         fetchFn = fetch,
-        protocolVersion = LATEST_PROTOCOL_VERSION
+        protocolVersion = LATEST_PROTOCOL_VERSION,
+        skipIssuerValidation = false
     }: {
         fetchFn?: FetchLike;
         protocolVersion?: string;
+        skipIssuerValidation?: boolean;
     } = {}
 ): Promise<AuthorizationServerMetadata | undefined> {
     const headers = {
@@ -1121,11 +1153,29 @@ export async function discoverAuthorizationServerMetadata(
         }
 
         // Parse and validate based on type
-        if (type === 'oauth') {
-            return OAuthMetadataSchema.parse(await response.json());
-        } else {
-            return OpenIdProviderDiscoveryMetadataSchema.parse(await response.json());
+        const parsed =
+            type === 'oauth'
+                ? OAuthMetadataSchema.parse(await response.json())
+                : OpenIdProviderDiscoveryMetadataSchema.parse(await response.json());
+
+        if (!skipIssuerValidation) {
+            // RFC 8414 §3.3 / OIDC Discovery §4.3: the `issuer` value in the document MUST be
+            // identical to the issuer identifier used to construct the well-known URL. Compare
+            // against the raw input string — callers pass the exact issuer string the AS published.
+            const expectedIssuer = typeof authorizationServerUrl === 'string' ? authorizationServerUrl : authorizationServerUrl.href;
+            // One narrow tolerance: the SDK's own legacy-fallback path synthesizes the AS URL via
+            // `String(new URL('/', serverUrl))`, which always carries a trailing `/`. That value is
+            // SDK-generated (not attacker-controlled), so accept the slash-only difference here.
+            // The tolerance is one-directional and end-anchored — a different host or path is still
+            // a mismatch.
+            const matches =
+                parsed.issuer === expectedIssuer || (expectedIssuer.endsWith('/') && parsed.issuer === expectedIssuer.slice(0, -1));
+            if (!matches) {
+                throw new IssuerMismatchError(expectedIssuer, parsed.issuer);
+            }
         }
+
+        return parsed;
     }
 
     return undefined;
